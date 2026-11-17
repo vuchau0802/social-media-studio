@@ -36,3 +36,16 @@ def create_post(post: PostCreate):
             post_id = result.lastrowid
 
     return {"id": post_id}
+
+@app.get("/posts/{post_id}")
+def get_post(post_id: int):
+    with closing(sqlite3.connect(DB_PATH)) as connection:
+        row = connection.execute(
+            "SELECT id, markdown FROM posts WHERE id = ?",
+            (post_id,),
+        ).fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Post not found.")
+
+    return {"id": row[0], "markdown": row[1]}
