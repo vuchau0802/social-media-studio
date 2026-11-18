@@ -4,6 +4,8 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from generator import generate_variants
+from profiles import validate_variant
 
 app = FastAPI()
 DB_PATH = Path(__file__).with_name("studio.db")
@@ -49,3 +51,52 @@ def get_post(post_id: int):
         raise HTTPException(status_code=404, detail="Post not found.")
 
     return {"id": row[0], "markdown": row[1]}
+
+@app.post("/posts/{post_id}/variants", status_code=201)
+def create_variants(post_id: int):
+    post = get_post(post_id)
+    drafts = generate_variants(post["markdown"])
+
+    for draft in drafts:
+        errors = validate_variant(draft["platform"], draft["text"])
+
+        if errors:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "platform": draft["platform"],
+                    "errors": errors,
+                },
+            )
+
+    saved = []
+
+    with closing(sqlite3.connect(DB_PATH)) as connection:
+        with connection:
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS variants (
+                    id INTEGER PRIMARY KEY,
+                    post_id INTEGER NOT NULL REFERENCES posts(id),
+                    platform TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'draft'
+                )
+            """)
+
+            for draft in drafts:
+                result = connection.execute(
+                    """
+                    INSERT INTO variants (post_id, platform, text)
+                    VALUES (?, ?, ?)
+                    """,
+                    (post_id, draft["platform"], draft["text"]),
+                )
+
+                saved.append({
+                    "id": result.lastrowid,
+                    "post_id": post_id,
+                    **draft,
+                    "status": "draft",
+                })
+
+    return saved
