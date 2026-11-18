@@ -1,6 +1,6 @@
 import re
 
-from profiles import PROFILES
+from app.profiles import PROFILES
 
 TEMPLATES = {
     "mock_x": ("From the blog: ", " #Blog"),
