@@ -1,15 +1,17 @@
-import sqlite3
-from contextlib import closing
-from pathlib import Path
-
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from app.generator import generate_variants
 from app.profiles import validate_variant
+from app.database import connect_db, init_db
+from contextlib import asynccontextmanager
 
-app = FastAPI()
-DB_PATH = Path(__file__).resolve().parent.parent / "studio.db"
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
 
+
+app = FastAPI(lifespan=lifespan)
 
 class PostCreate(BaseModel):
     markdown: str
@@ -23,7 +25,7 @@ def create_post(post: PostCreate):
             detail="Markdown must contain text.",
         )
 
-    with closing(sqlite3.connect(DB_PATH)) as connection:
+    with connect_db() as connection:
         with connection:
             connection.execute("""
                 CREATE TABLE IF NOT EXISTS posts (
@@ -41,7 +43,7 @@ def create_post(post: PostCreate):
 
 @app.get("/posts/{post_id}")
 def get_post(post_id: int):
-    with closing(sqlite3.connect(DB_PATH)) as connection:
+    with connect_db() as connection:
         row = connection.execute(
             "SELECT id, markdown FROM posts WHERE id = ?",
             (post_id,),
@@ -71,7 +73,7 @@ def create_variants(post_id: int):
 
     saved = []
 
-    with closing(sqlite3.connect(DB_PATH)) as connection:
+    with connect_db() as connection:
         with connection:
             connection.execute("""
                 CREATE TABLE IF NOT EXISTS variants (
