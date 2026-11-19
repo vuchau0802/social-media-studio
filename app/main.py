@@ -2,8 +2,10 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from app.generator import generate_variants
 from app.profiles import validate_variant
-from app.database import connect_db, init_db
+from app.database import init_db
 from contextlib import asynccontextmanager
+from app.repositories.posts import insert_post, find_post
+from app.repositories.variants import insert_variants, list_variants
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -25,34 +27,21 @@ def create_post(post: PostCreate):
             detail="Markdown must contain text.",
         )
 
-    with connect_db() as connection:
-        with connection:
-            connection.execute("""
-                CREATE TABLE IF NOT EXISTS posts (
-                    id INTEGER PRIMARY KEY,
-                    markdown TEXT NOT NULL
-                )
-            """)
-            result = connection.execute(
-                "INSERT INTO posts (markdown) VALUES (?)",
-                (post.markdown,),
-            )
-            post_id = result.lastrowid
-
+    post_id = insert_post(post.markdown)
     return {"id": post_id}
+
 
 @app.get("/posts/{post_id}")
 def get_post(post_id: int):
-    with connect_db() as connection:
-        row = connection.execute(
-            "SELECT id, markdown FROM posts WHERE id = ?",
-            (post_id,),
-        ).fetchone()
+    post = find_post(post_id)
 
-    if row is None:
-        raise HTTPException(status_code=404, detail="Post not found.")
+    if post is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Post not found.",
+        )
 
-    return {"id": row[0], "markdown": row[1]}
+    return post
 
 @app.post("/posts/{post_id}/variants", status_code=201)
 def create_variants(post_id: int):
@@ -71,34 +60,9 @@ def create_variants(post_id: int):
                 },
             )
 
-    saved = []
+    return insert_variants(post_id, drafts)
 
-    with connect_db() as connection:
-        with connection:
-            connection.execute("""
-                CREATE TABLE IF NOT EXISTS variants (
-                    id INTEGER PRIMARY KEY,
-                    post_id INTEGER NOT NULL REFERENCES posts(id),
-                    platform TEXT NOT NULL,
-                    text TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'draft'
-                )
-            """)
-
-            for draft in drafts:
-                result = connection.execute(
-                    """
-                    INSERT INTO variants (post_id, platform, text)
-                    VALUES (?, ?, ?)
-                    """,
-                    (post_id, draft["platform"], draft["text"]),
-                )
-
-                saved.append({
-                    "id": result.lastrowid,
-                    "post_id": post_id,
-                    **draft,
-                    "status": "draft",
-                })
-
-    return saved
+@app.get("/posts/{post_id}/variants")
+def get_variants(post_id: int):
+    get_post(post_id)
+    return list_variants(post_id)
