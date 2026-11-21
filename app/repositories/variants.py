@@ -48,3 +48,39 @@ def list_variants(post_id: int) -> list[dict]:
         }
         for row in rows
     ]
+
+def find_variant(variant_id: int) -> dict | None:
+    with connect_db() as connection:
+        row = connection.execute(
+            """
+            SELECT id, post_id, platform, text, status
+            FROM variants
+            WHERE id = ?
+            """,
+            (variant_id,),
+        ).fetchone()
+
+    if row is None:
+        return None
+
+    return {
+        "id": row[0],
+        "post_id": row[1],
+        "platform": row[2],
+        "text": row[3],
+        "status": row[4],
+    }
+
+
+def change_draft_status(variant_id: int, status: str) -> bool:
+    with connect_db() as connection:
+        with connection:
+            result = connection.execute(
+                """
+                UPDATE variants
+                SET status = ?
+                WHERE id = ? AND status = 'draft'
+                """,
+                (status, variant_id),
+            )
+            return result.rowcount == 1

@@ -6,6 +6,7 @@ from app.database import init_db
 from contextlib import asynccontextmanager
 from app.repositories.posts import insert_post, find_post
 from app.repositories.variants import insert_variants, list_variants
+from app.services.review import review_variant
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -66,3 +67,21 @@ def create_variants(post_id: int):
 def get_variants(post_id: int):
     get_post(post_id)
     return list_variants(post_id)
+
+def handle_review(variant_id: int, decision: str):
+    try:
+        return review_variant(variant_id, decision)
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post("/variants/{variant_id}/approve")
+def approve_variant(variant_id: int):
+    return handle_review(variant_id, "approved")
+
+
+@app.post("/variants/{variant_id}/reject")
+def reject_variant(variant_id: int):
+    return handle_review(variant_id, "rejected")
