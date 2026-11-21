@@ -72,15 +72,42 @@ def find_variant(variant_id: int) -> dict | None:
     }
 
 
-def change_draft_status(variant_id: int, status: str) -> bool:
+def change_draft_status(
+    variant_id: int,
+    status: str,
+    expected_text: str,
+) -> bool:
     with connect_db() as connection:
         with connection:
             result = connection.execute(
                 """
                 UPDATE variants
                 SET status = ?
-                WHERE id = ? AND status = 'draft'
+                WHERE id = ? AND status = 'draft' AND text = ?
                 """,
-                (status, variant_id),
+                (status, variant_id, expected_text),
+            )
+            return result.rowcount == 1
+
+def update_variant_text(variant: dict, text: str) -> bool:
+    with connect_db() as connection:
+        with connection:
+            result = connection.execute(
+                """
+                UPDATE variants
+                SET text = ?, status = 'draft'
+                WHERE id = ? AND text = ? AND status = ?
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM publish_jobs
+                        WHERE variant_id = variants.id
+                    )
+                """,
+                (
+                    text,
+                    variant["id"],
+                    variant["text"],
+                    variant["status"],
+                ),
             )
             return result.rowcount == 1

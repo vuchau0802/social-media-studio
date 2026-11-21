@@ -7,6 +7,9 @@ from contextlib import asynccontextmanager
 from app.repositories.posts import insert_post, find_post
 from app.repositories.variants import insert_variants, list_variants
 from app.services.review import review_variant
+from app.schemas import VariantEdit, ScheduleCreate
+from app.services.variants import edit_variant
+from app.services.scheduling import schedule_variant
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -85,3 +88,25 @@ def approve_variant(variant_id: int):
 @app.post("/variants/{variant_id}/reject")
 def reject_variant(variant_id: int):
     return handle_review(variant_id, "rejected")
+
+@app.patch("/variants/{variant_id}")
+def update_variant(variant_id: int, body: VariantEdit):
+    try:
+        return edit_variant(variant_id, body.text)
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+@app.post("/variants/{variant_id}/schedule", status_code=201)
+def create_schedule(variant_id: int, body: ScheduleCreate):
+    try:
+        return schedule_variant(variant_id, body.scheduled_at)
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error

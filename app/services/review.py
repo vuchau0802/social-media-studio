@@ -19,7 +19,7 @@ def review_variant(variant_id: int, decision: str) -> dict:
         if errors:
             raise ValueError(" ".join(errors))
 
-    if not change_draft_status(variant_id, decision):
+    if not change_draft_status(variant_id, decision, variant["text"]):
         raise ValueError("Variant changed during review. Reload and retry.")
 
     return {**variant, "status": decision}

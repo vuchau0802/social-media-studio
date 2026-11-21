@@ -33,3 +33,16 @@ def init_db():
                     status TEXT NOT NULL DEFAULT 'draft'
                 )
             """)
+
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS publish_jobs (
+                    id INTEGER PRIMARY KEY,
+                    variant_id INTEGER NOT NULL REFERENCES variants(id),
+                    scheduled_at TEXT NOT NULL,
+                    platform TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    UNIQUE (variant_id, scheduled_at)
+                )
+            """)
