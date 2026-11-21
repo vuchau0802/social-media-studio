@@ -10,6 +10,8 @@ from app.services.review import review_variant
 from app.schemas import VariantEdit, ScheduleCreate
 from app.services.variants import edit_variant
 from app.services.scheduling import schedule_variant
+from app.repositories.mock_publications import find_publication
+from app.repositories.history import list_publish_history
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -110,3 +112,19 @@ def create_schedule(variant_id: int, body: ScheduleCreate):
         raise HTTPException(status_code=422, detail=str(error)) from error
     except RuntimeError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+
+@app.get("/mock-publications/{publication_id}")
+def get_mock_publication(publication_id: int):
+    publication = find_publication(publication_id)
+
+    if publication is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Mock publication not found.",
+        )
+
+    return publication
+
+@app.get("/publish-history")
+def get_publish_history():
+    return list_publish_history()
