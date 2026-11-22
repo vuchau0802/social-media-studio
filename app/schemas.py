@@ -5,3 +5,6 @@ class ScheduleCreate(BaseModel):
     
 class VariantEdit(BaseModel):
     text: str
+
+class PostCreate(BaseModel):
+    markdown: str
