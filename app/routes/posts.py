@@ -1,7 +1,5 @@
 from fastapi import APIRouter, HTTPException
-
-from app.repositories.posts import insert_post
-from app.services.posts import require_post
+from app.services.posts import create_stored_post, require_post
 from app.schemas import PostCreate
 
 router = APIRouter(prefix="/posts", tags=["posts"])
@@ -9,13 +7,11 @@ router = APIRouter(prefix="/posts", tags=["posts"])
 
 @router.post("", status_code=201)
 def create_post(post: PostCreate):
-    if not post.markdown.strip():
-        raise HTTPException(
-            status_code=422,
-            detail="Markdown must contain text.",
-        )
+    try:
+        post_id = create_stored_post(post.markdown)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
-    post_id = insert_post(post.markdown)
     return {"id": post_id}
 
 

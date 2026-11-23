@@ -1,39 +1,25 @@
 from fastapi import APIRouter, HTTPException
-
-from app.generator import generate_variants
-from app.profiles import validate_variant
-from app.repositories.variants import insert_variants, list_variants
 from app.schemas import ScheduleCreate, VariantEdit
-from app.services.posts import require_post
 from app.services.review import review_variant
 from app.services.scheduling import schedule_variant
-from app.services.variants import edit_variant
+from app.services.variants import VariantGenerationError, create_post_variants, edit_variant, get_post_variants
 
 router = APIRouter(tags=["variants"])
 
 @router.post("/posts/{post_id}/variants", status_code=201)
 def create_variants(post_id: int):
-    post = require_post(post_id)
-    drafts = generate_variants(post["markdown"])
+    try:
+        return create_post_variants(post_id)
+    except VariantGenerationError as error:
+        raise HTTPException(
+            status_code=422,
+            detail=error.detail,
+        ) from error
 
-    for draft in drafts:
-        errors = validate_variant(draft["platform"], draft["text"])
-
-        if errors:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "platform": draft["platform"],
-                    "errors": errors,
-                },
-            )
-
-    return insert_variants(post_id, drafts)
 
 @router.get("/posts/{post_id}/variants")
 def get_variants(post_id: int):
-    require_post(post_id)
-    return list_variants(post_id)
+    return get_post_variants(post_id)
 
 def handle_review(variant_id: int, decision: str):
     try:
