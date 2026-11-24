@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory
 from app import database
 from app.publishers.mock import MockXPublisher
 from app.repositories.worker import claim_due_job, finish_attempt
+from app.services.retry_policy import MAX_ATTEMPTS
 from app.worker import run_once
 
 
@@ -53,6 +54,119 @@ class WorkerRecoveryTests(unittest.TestCase):
                     """,
                     (due,),
                 )
+
+    def test_future_retry_time_blocks_claim(self):
+        future = (
+            datetime.now(timezone.utc) + timedelta(minutes=5)
+        ).isoformat(timespec="microseconds")
+
+        with database.connect_db() as connection:
+            with connection:
+                connection.execute(
+                    """
+                    INSERT INTO job_retry_state (job_id, next_attempt_at)
+                    VALUES (1, ?)
+                    """,
+                    (future,),
+                )
+
+        self.assertIsNone(claim_due_job())
+
+        past = (
+            datetime.now(timezone.utc) - timedelta(seconds=1)
+        ).isoformat(timespec="microseconds")
+
+        with database.connect_db() as connection:
+            with connection:
+                connection.execute(
+                    """
+                    UPDATE job_retry_state
+                    SET next_attempt_at = ?
+                    WHERE job_id = 1
+                    """,
+                    (past,),
+                )
+
+        job = claim_due_job()
+        self.assertIsNotNone(job)
+        self.assertEqual(job["id"], 1)
+        self.assertEqual(job["idempotency_key"], "recovery-check")
+
+    def test_expired_retry_window_blocks_recovery(self):
+        original_job = claim_due_job()
+        self.assertIsNotNone(original_job)
+
+        old_start = (
+            datetime.now(timezone.utc) - timedelta(minutes=31)
+        ).isoformat(timespec="microseconds")
+        expired_lease = (
+            datetime.now(timezone.utc) - timedelta(seconds=1)
+        ).isoformat(timespec="microseconds")
+
+        with database.connect_db() as connection:
+            with connection:
+                connection.execute(
+                    "UPDATE publish_attempts SET started_at = ?",
+                    (old_start,),
+                )
+                connection.execute(
+                    "UPDATE job_leases SET expires_at = ?",
+                    (expired_lease,),
+                )
+
+        self.assertIsNone(claim_due_job())
+
+        with database.connect_db() as connection:
+            job_status = connection.execute(
+                "SELECT status FROM publish_jobs WHERE id = 1"
+            ).fetchone()[0]
+            attempts = connection.execute(
+                "SELECT outcome, error FROM publish_attempts"
+            ).fetchall()
+            lease_count = connection.execute(
+                "SELECT COUNT(*) FROM job_leases"
+            ).fetchone()[0]
+
+        self.assertEqual(job_status, "failed")
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0][0], "interrupted")
+        self.assertIn("Retry window exceeded", attempts[0][1])
+        self.assertEqual(lease_count, 0)
+
+    def test_attempt_limit_blocks_another_recovery(self):
+        for _ in range(MAX_ATTEMPTS):
+            self.assertIsNotNone(claim_due_job())
+
+            expired = (
+                datetime.now(timezone.utc) - timedelta(seconds=1)
+            ).isoformat(timespec="microseconds")
+            with database.connect_db() as connection:
+                with connection:
+                    connection.execute(
+                        "UPDATE job_leases SET expires_at = ?",
+                        (expired,),
+                    )
+
+        self.assertIsNone(claim_due_job())
+
+        with database.connect_db() as connection:
+            attempt_count = connection.execute(
+                "SELECT COUNT(*) FROM publish_attempts"
+            ).fetchone()[0]
+            job_status = connection.execute(
+                "SELECT status FROM publish_jobs WHERE id = 1"
+            ).fetchone()[0]
+            last_attempt = connection.execute(
+                """
+                SELECT outcome, error FROM publish_attempts
+                ORDER BY id DESC LIMIT 1
+                """
+            ).fetchone()
+
+        self.assertEqual(attempt_count, MAX_ATTEMPTS)
+        self.assertEqual(job_status, "failed")
+        self.assertEqual(last_attempt[0], "interrupted")
+        self.assertIn("Maximum publish attempts", last_attempt[1])
 
     def test_recovery_after_adapter_accepts_post(self):
         original_job = claim_due_job()

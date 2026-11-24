@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from app.database import connect_db
-
+from app.services.retry_policy import MAX_ATTEMPTS, RETRY_WINDOW
 
 def claim_due_job(lease_seconds: int = 60) -> dict | None:
     if lease_seconds <= 0:
@@ -24,7 +24,12 @@ def claim_due_job(lease_seconds: int = 60) -> dict | None:
                 FROM publish_jobs AS jobs
                 JOIN variants ON variants.id = jobs.variant_id
                 LEFT JOIN job_leases AS leases ON leases.job_id = jobs.id
+                LEFT JOIN job_retry_state AS retries ON retries.job_id = jobs.id
                 WHERE jobs.scheduled_at <= ?
+                  AND (
+                      retries.job_id IS NULL
+                      OR retries.next_attempt_at <= ?
+                  )
                   AND variants.status IN ('approved', 'published')
                   AND (
                       jobs.status = 'pending'
@@ -39,10 +44,68 @@ def claim_due_job(lease_seconds: int = 60) -> dict | None:
                 ORDER BY jobs.scheduled_at, jobs.id
                 LIMIT 1
                 """,
-                (now_text, now_text),
+                (now_text, now_text, now_text),
             ).fetchone()
 
             if job is None:
+                return None
+
+            attempt_stats = connection.execute(
+                """
+                SELECT COUNT(*), MIN(started_at)
+                FROM publish_attempts
+                WHERE job_id = ?
+                """,
+                (job["id"],),
+            ).fetchone()
+
+            attempt_count = attempt_stats[0]
+            first_started_at = attempt_stats[1]
+            limit_error = None
+
+            if attempt_count >= MAX_ATTEMPTS:
+                limit_error = "Maximum publish attempts reached."
+            elif first_started_at is not None:
+                first_started = datetime.fromisoformat(first_started_at)
+
+                if now >= first_started + RETRY_WINDOW:
+                    limit_error = (
+                        "Retry window exceeded. Reconcile before publishing again."
+                    )
+
+            if limit_error is not None:
+                connection.execute(
+                    """
+                    UPDATE publish_attempts
+                    SET outcome = 'interrupted', finished_at = ?
+                    WHERE job_id = ? AND outcome = 'started'
+                    """,
+                    (now_text, job["id"]),
+                )
+                connection.execute(
+                    """
+                    UPDATE publish_attempts
+                    SET error = COALESCE(error || ' ', '') || ?
+                    WHERE id = (
+                        SELECT MAX(id)
+                        FROM publish_attempts
+                        WHERE job_id = ?
+                    )
+                    """,
+                    (limit_error, job["id"]),
+                )
+                connection.execute(
+                    "UPDATE publish_jobs SET status = 'failed' WHERE id = ?",
+                    (job["id"],),
+                )
+                connection.execute(
+                    "DELETE FROM job_leases WHERE job_id = ?",
+                    (job["id"],),
+                )
+                connection.execute(
+                    "DELETE FROM job_retry_state WHERE job_id = ?",
+                    (job["id"],),
+                )
                 return None
 
             token = str(uuid4())

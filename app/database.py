@@ -101,3 +101,10 @@ def init_db():
                     UNIQUE (platform, idempotency_key)
                 )
             """)
+
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS job_retry_state (
+                    job_id INTEGER PRIMARY KEY REFERENCES publish_jobs(id),
+                    next_attempt_at TEXT NOT NULL
+                )
+            """)
