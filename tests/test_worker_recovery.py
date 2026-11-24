@@ -6,8 +6,10 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import Mock, patch
 
 from app import database
+from app.publishers.errors import RetryablePublishError
 from app.publishers.mock import MockXPublisher
 from app.repositories.worker import claim_due_job, finish_attempt
 from app.services.retry_policy import MAX_ATTEMPTS
@@ -54,6 +56,202 @@ class WorkerRecoveryTests(unittest.TestCase):
                     """,
                     (due,),
                 )
+
+    def test_worker_persists_provider_delay_without_early_retry(self):
+        publisher = Mock()
+        publisher.publish.side_effect = RetryablePublishError(
+            "Rate limited.",
+            retry_after_seconds=45,
+        )
+        before = datetime.now(timezone.utc)
+
+        with patch("app.worker.get_publisher", return_value=publisher):
+            self.assertTrue(run_once())
+            self.assertFalse(run_once())
+
+        after = datetime.now(timezone.utc)
+        publisher.publish.assert_called_once_with(
+            "Recovery example",
+            "recovery-check",
+        )
+
+        with database.connect_db() as connection:
+            job = connection.execute(
+                "SELECT status, scheduled_at FROM publish_jobs WHERE id = 1"
+            ).fetchone()
+            retry_at = connection.execute(
+                "SELECT next_attempt_at FROM job_retry_state WHERE job_id = 1"
+            ).fetchone()[0]
+            attempts = connection.execute(
+                "SELECT outcome, error FROM publish_attempts"
+            ).fetchall()
+            lease_count = connection.execute(
+                "SELECT COUNT(*) FROM job_leases"
+            ).fetchone()[0]
+
+        self.assertEqual(job[0], "pending")
+        self.assertLess(datetime.fromisoformat(job[1]), before)
+        self.assertGreaterEqual(
+            datetime.fromisoformat(retry_at),
+            before + timedelta(seconds=45),
+        )
+        self.assertLessEqual(
+            datetime.fromisoformat(retry_at),
+            after + timedelta(seconds=45),
+        )
+        self.assertEqual(attempts, [("failed", "RetryablePublishError")])
+        self.assertEqual(lease_count, 0)
+
+    def test_saved_retry_recovers_with_same_key_and_clears_retry_state(self):
+        publisher = Mock()
+        publisher.publish.side_effect = RetryablePublishError("Temporary failure.")
+
+        with patch("app.worker.get_publisher", return_value=publisher):
+            self.assertTrue(run_once())
+
+        past = (
+            datetime.now(timezone.utc) - timedelta(seconds=1)
+        ).isoformat(timespec="microseconds")
+        with database.connect_db() as connection:
+            with connection:
+                connection.execute(
+                    "UPDATE job_retry_state SET next_attempt_at = ?",
+                    (past,),
+                )
+
+        self.assertTrue(run_once())
+        self.assertFalse(run_once())
+
+        with database.connect_db() as connection:
+            publications = connection.execute(
+                "SELECT idempotency_key FROM mock_publications"
+            ).fetchall()
+            outcomes = connection.execute(
+                "SELECT outcome FROM publish_attempts ORDER BY id"
+            ).fetchall()
+            job_status = connection.execute(
+                "SELECT status FROM publish_jobs WHERE id = 1"
+            ).fetchone()[0]
+            retry_count = connection.execute(
+                "SELECT COUNT(*) FROM job_retry_state"
+            ).fetchone()[0]
+
+        self.assertEqual(publications, [("recovery-check",)])
+        self.assertEqual(outcomes, [("failed",), ("success",)])
+        self.assertEqual(job_status, "published")
+        self.assertEqual(retry_count, 0)
+
+    def test_stale_worker_cannot_schedule_retry(self):
+        original_job = claim_due_job()
+        self.assertIsNotNone(original_job)
+        expired = (
+            datetime.now(timezone.utc) - timedelta(seconds=1)
+        ).isoformat(timespec="microseconds")
+
+        with database.connect_db() as connection:
+            with connection:
+                connection.execute(
+                    "UPDATE job_leases SET expires_at = ?",
+                    (expired,),
+                )
+
+        recovered_job = claim_due_job()
+        self.assertIsNotNone(recovered_job)
+        self.assertFalse(
+            finish_attempt(
+                original_job,
+                "failed",
+                retry_after_seconds=45,
+            )
+        )
+
+        with database.connect_db() as connection:
+            retry_count = connection.execute(
+                "SELECT COUNT(*) FROM job_retry_state"
+            ).fetchone()[0]
+            lease_token = connection.execute(
+                "SELECT token FROM job_leases WHERE job_id = 1"
+            ).fetchone()[0]
+            job_status = connection.execute(
+                "SELECT status FROM publish_jobs WHERE id = 1"
+            ).fetchone()[0]
+
+        self.assertEqual(retry_count, 0)
+        self.assertEqual(lease_token, recovered_job["lease_token"])
+        self.assertEqual(job_status, "processing")
+
+    def test_retryable_fifth_failure_becomes_terminal(self):
+        for attempt_index in range(MAX_ATTEMPTS):
+            job = claim_due_job()
+            self.assertIsNotNone(job)
+
+            if attempt_index < MAX_ATTEMPTS - 1:
+                expired = (
+                    datetime.now(timezone.utc) - timedelta(seconds=1)
+                ).isoformat(timespec="microseconds")
+                with database.connect_db() as connection:
+                    with connection:
+                        connection.execute(
+                            "UPDATE job_leases SET expires_at = ?",
+                            (expired,),
+                        )
+
+        self.assertTrue(
+            finish_attempt(job, "failed", retry_after_seconds=30)
+        )
+
+        with database.connect_db() as connection:
+            job_status = connection.execute(
+                "SELECT status FROM publish_jobs WHERE id = 1"
+            ).fetchone()[0]
+            retry_count = connection.execute(
+                "SELECT COUNT(*) FROM job_retry_state"
+            ).fetchone()[0]
+            last_attempt = connection.execute(
+                """
+                SELECT outcome, error FROM publish_attempts
+                ORDER BY id DESC LIMIT 1
+                """
+            ).fetchone()
+
+        self.assertEqual(job_status, "failed")
+        self.assertEqual(retry_count, 0)
+        self.assertEqual(last_attempt[0], "failed")
+        self.assertIn("Maximum publish attempts", last_attempt[1])
+
+    def test_retry_outside_time_window_becomes_terminal(self):
+        job = claim_due_job()
+        self.assertIsNotNone(job)
+        old_start = (
+            datetime.now(timezone.utc) - timedelta(minutes=29, seconds=50)
+        ).isoformat(timespec="microseconds")
+
+        with database.connect_db() as connection:
+            with connection:
+                connection.execute(
+                    "UPDATE publish_attempts SET started_at = ?",
+                    (old_start,),
+                )
+
+        self.assertTrue(
+            finish_attempt(job, "failed", retry_after_seconds=45)
+        )
+
+        with database.connect_db() as connection:
+            job_status = connection.execute(
+                "SELECT status FROM publish_jobs WHERE id = 1"
+            ).fetchone()[0]
+            retry_count = connection.execute(
+                "SELECT COUNT(*) FROM job_retry_state"
+            ).fetchone()[0]
+            error = connection.execute(
+                "SELECT error FROM publish_attempts WHERE id = ?",
+                (job["attempt_id"],),
+            ).fetchone()[0]
+
+        self.assertEqual(job_status, "failed")
+        self.assertEqual(retry_count, 0)
+        self.assertIn("Retry window exceeded", error)
 
     def test_future_retry_time_blocks_claim(self):
         future = (

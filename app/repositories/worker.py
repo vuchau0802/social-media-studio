@@ -3,7 +3,12 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from app.database import connect_db
-from app.services.retry_policy import MAX_ATTEMPTS, RETRY_WINDOW
+from app.services.retry_policy import (
+    MAX_ATTEMPTS,
+    RETRY_WINDOW,
+    RetryLimitExceeded,
+    next_retry_at,
+)
 
 def claim_due_job(lease_seconds: int = 60) -> dict | None:
     if lease_seconds <= 0:
@@ -161,16 +166,19 @@ def finish_attempt(
     post_id: str | None = None,
     url: str | None = None,
     error: str | None = None,
+    *,
+    retry_after_seconds: int | None = None,
 ) -> bool:
     if outcome not in {"success", "failed"}:
         raise ValueError("Outcome must be success or failed.")
+    if retry_after_seconds is not None and outcome != "failed":
+        raise ValueError("Only failed attempts can schedule a retry.")
 
     with connect_db() as connection:
         with connection:
             connection.execute("BEGIN IMMEDIATE")
-            now = datetime.now(timezone.utc).isoformat(
-                timespec="microseconds"
-            )
+            now_datetime = datetime.now(timezone.utc)
+            now = now_datetime.isoformat(timespec="microseconds")
 
             current = connection.execute(
                 """
@@ -198,6 +206,31 @@ def finish_attempt(
             if current is None:
                 return False
 
+            job_status = "published" if outcome == "success" else "failed"
+            retry_at = None
+
+            if retry_after_seconds is not None:
+                attempt_stats = connection.execute(
+                    """
+                    SELECT COUNT(*), MIN(started_at)
+                    FROM publish_attempts
+                    WHERE job_id = ?
+                    """,
+                    (job["id"],),
+                ).fetchone()
+
+                try:
+                    retry_at = next_retry_at(
+                        first_started_at=datetime.fromisoformat(attempt_stats[1]),
+                        attempt_count=attempt_stats[0],
+                        requested_delay=retry_after_seconds,
+                        now=now_datetime,
+                    )
+                except RetryLimitExceeded as limit:
+                    error = f"{error} {limit}" if error else str(limit)
+                else:
+                    job_status = "pending"
+
             connection.execute(
                 """
                 UPDATE publish_attempts
@@ -215,7 +248,24 @@ def finish_attempt(
                 ),
             )
 
-            job_status = "published" if outcome == "success" else "failed"
+            if retry_at is not None:
+                connection.execute(
+                    """
+                    INSERT INTO job_retry_state (job_id, next_attempt_at)
+                    VALUES (?, ?)
+                    ON CONFLICT (job_id) DO UPDATE
+                    SET next_attempt_at = excluded.next_attempt_at
+                    """,
+                    (
+                        job["id"],
+                        retry_at.isoformat(timespec="microseconds"),
+                    ),
+                )
+            else:
+                connection.execute(
+                    "DELETE FROM job_retry_state WHERE job_id = ?",
+                    (job["id"],),
+                )
 
             connection.execute(
                 "UPDATE publish_jobs SET status = ? WHERE id = ?",

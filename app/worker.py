@@ -2,6 +2,7 @@ import logging
 import time
 
 from app.database import init_db
+from app.publishers.errors import RetryablePublishError
 from app.publishers.registry import get_publisher
 from app.repositories.worker import claim_due_job, finish_attempt
 
@@ -20,6 +21,19 @@ def run_once() -> bool:
             job["text"],
             job["idempotency_key"],
         )
+    except RetryablePublishError as error:
+        recorded = finish_attempt(
+            job,
+            outcome="failed",
+            error=type(error).__name__,
+            retry_after_seconds=error.retry_after_seconds,
+        )
+        logger.warning(
+            "Job %s retryable failure recorded: %s",
+            job["id"],
+            recorded,
+        )
+        return True
     except Exception as error:
         recorded = finish_attempt(
             job,
