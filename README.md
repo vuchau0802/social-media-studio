@@ -6,7 +6,7 @@ Social Media Studio turns a blog post into platform-specific drafts that a human
 
 Markdown ingestion, template generation, review, persistent scheduling, mock publishing, publish history, and bounded retries are implemented. The Mastodon adapter has offline HTTP tests. Live Mastodon credential verification and publishing are awaiting account approval.
 
-The current test suite contains 29 tests. The latest developer-run suite passed all 29.
+The current test suite contains 33 tests. The latest developer-run suite passed all 33.
 
 The combined launcher has been manually verified on Windows. After `Ctrl+C`, port `8000` was closed and the worker process had exited.
 
@@ -165,9 +165,32 @@ The script prints the verified account name and server. Verification performs an
 
 Live Mastodon verification and a real scheduled publish remain pending while account approval is outstanding.
 
+## Publisher selection
+
+Configure adapters in `.env` using these defaults.
+
+```dotenv
+PUBLISHER_MOCK_X=mock_x
+PUBLISHER_MOCK_LINKEDIN=mock_linkedin
+PUBLISHER_MASTODON=mastodon
+```
+
+Each setting selects the publishing adapter for its platform. The variant keeps its original text constraint profile. Process environment variables override `.env` values.
+
+For example, this setting publishes newly scheduled Mastodon-style variants through the local Mock X adapter.
+
+```dotenv
+PUBLISHER_MASTODON=mock_x
+```
+
+The selected adapter is saved when a job is scheduled. Existing jobs and retries retain their saved adapter after configuration changes. Jobs created before adapter selection was introduced use their original platform adapter.
+
+Configuration-based switching was verified locally by scheduling a Mastodon-style variant and retrieving its successful Mock X preview. Restore `PUBLISHER_MASTODON=mastodon` when preparing future jobs for real Mastodon publishing.
+
 ## Reliability behavior
 
 - A unique `(variant_id, scheduled_at)` constraint identifies each scheduled slot. Each job stores a snapshot of the approved text and platform plus a stable idempotency key.
+- Each scheduled job stores its selected publisher adapter. Configuration changes apply to newly scheduled jobs.
 - Mock publications enforce uniqueness per platform and key. Reusing a key with different text raises an error.
 - Workers claim jobs transactionally using 60-second leases. Expired claims can be recovered, and stale workers cannot record completion or schedule retries.
 - Each claimed attempt is stored with an outcome of `started`, `success`, `failed`, or `interrupted`. Successful completion updates the attempt, job, and variant in one transaction.
@@ -199,14 +222,14 @@ Missing records return `404`. Input validation errors return `422`. Workflow con
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-The current suite covers content generation, blocked variants, configuration precedence, Mastodon HTTP requests, rate-limit parsing, bounded retries, leases, and recovery after an abrupt process exit. Tests use temporary databases and simulated Mastodon responses. Two worker tests intentionally emit retryable-failure log messages.
+The current suite covers content generation, blocked variants, configuration precedence, saved adapter selection across configuration changes, Mastodon HTTP requests, rate-limit parsing, bounded retries, leases, and recovery after an abrupt process exit. Tests use temporary databases and simulated Mastodon responses. Two worker tests intentionally emit retryable-failure log messages.
 
 ## Project structure
 
 ```text
 app/
   main.py                 Application startup, error handling, and router registration
-  config.py               Mastodon settings
+  config.py               Mastodon settings and publisher selection
   database.py             SQLite connections and initial schema
   schemas.py              Request models
   generator.py            Template-based text generation
