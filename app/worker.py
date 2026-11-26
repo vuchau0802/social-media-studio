@@ -16,7 +16,7 @@ def run_once() -> bool:
         return False
 
     try:
-        publisher = get_publisher(job["platform"])
+        publisher = get_publisher(job["adapter"])
         result = publisher.publish(
             job["text"],
             job["idempotency_key"],

@@ -25,11 +25,13 @@ def claim_due_job(lease_seconds: int = 60) -> dict | None:
 
             job = connection.execute(
                 """
-                SELECT jobs.*
+                SELECT jobs.*,
+                       COALESCE(publishers.adapter, jobs.platform) AS adapter
                 FROM publish_jobs AS jobs
                 JOIN variants ON variants.id = jobs.variant_id
                 LEFT JOIN job_leases AS leases ON leases.job_id = jobs.id
                 LEFT JOIN job_retry_state AS retries ON retries.job_id = jobs.id
+                LEFT JOIN job_publishers AS publishers ON publishers.job_id = jobs.id
                 WHERE jobs.scheduled_at <= ?
                   AND (
                       retries.job_id IS NULL
@@ -112,6 +114,15 @@ def claim_due_job(lease_seconds: int = 60) -> dict | None:
                     (job["id"],),
                 )
                 return None
+
+            connection.execute(
+                """
+                INSERT INTO job_publishers (job_id, adapter)
+                VALUES (?, ?)
+                ON CONFLICT (job_id) DO NOTHING
+                """,
+                (job["id"], job["adapter"]),
+            )
 
             token = str(uuid4())
             expires_at = (

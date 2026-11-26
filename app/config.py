@@ -47,3 +47,24 @@ def load_mastodon_settings() -> MastodonSettings:
         base_url=base_url,
         access_token=access_token,
     )
+
+def resolve_publisher(platform: str) -> str:
+    supported = {"mock_x", "mock_linkedin", "mastodon"}
+
+    if platform not in supported:
+        raise ValueError("Unknown platform.")
+
+    values = {
+        **dotenv_values(ENV_PATH),
+        **os.environ,
+    }
+
+    variable = f"PUBLISHER_{platform.upper()}"
+    adapter = (values.get(variable) or platform).strip()
+
+    if adapter not in supported:
+        raise ValueError(
+            f"{variable} must be mock_x, mock_linkedin, or mastodon."
+        )
+
+    return adapter

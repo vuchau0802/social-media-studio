@@ -2,7 +2,7 @@ import sqlite3
 from uuid import uuid4
 
 from app.database import connect_db
-
+from app.config import resolve_publisher
 
 def insert_job(variant_id: int, scheduled_at: str) -> dict:
     with connect_db() as connection:
@@ -22,7 +22,7 @@ def insert_job(variant_id: int, scheduled_at: str) -> dict:
             if variant["status"] != "approved":
                 raise RuntimeError("Only approved variants can be scheduled.")
 
-            connection.execute(
+            inserted = connection.execute(
                 """
                 INSERT INTO publish_jobs (
                     variant_id, scheduled_at, platform, text, idempotency_key
@@ -48,4 +48,23 @@ def insert_job(variant_id: int, scheduled_at: str) -> dict:
                 (variant_id, scheduled_at),
             ).fetchone()
 
-            return dict(job)
+            if inserted.rowcount == 1:
+                adapter = resolve_publisher(variant["platform"])
+            else:
+                adapter = job["platform"]
+
+            connection.execute(
+                """
+                INSERT INTO job_publishers (job_id, adapter)
+                VALUES (?, ?)
+                ON CONFLICT (job_id) DO NOTHING
+                """,
+                (job["id"], adapter),
+            )
+
+            saved_adapter = connection.execute(
+                "SELECT adapter FROM job_publishers WHERE job_id = ?",
+                (job["id"],),
+            ).fetchone()[0]
+
+            return {**dict(job), "adapter": saved_adapter}

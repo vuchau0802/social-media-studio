@@ -108,3 +108,10 @@ def init_db():
                     next_attempt_at TEXT NOT NULL
                 )
             """)
+
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS job_publishers (
+                    job_id INTEGER PRIMARY KEY REFERENCES publish_jobs(id),
+                    adapter TEXT NOT NULL
+                )
+            """)

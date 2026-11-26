@@ -5,7 +5,7 @@ from unittest.mock import patch
 from app.config import load_mastodon_settings
 from app.publishers.mastodon import MastodonPublisher
 from app.publishers.registry import get_publisher
-
+from app.config import load_mastodon_settings, resolve_publisher
 
 class ConfigTests(unittest.TestCase):
     def setUp(self):
@@ -60,3 +60,27 @@ class ConfigTests(unittest.TestCase):
             "MASTODON_BASE_URL and MASTODON_ACCESS_TOKEN are required.",
         ):
             load_mastodon_settings()
+
+    def test_publisher_defaults_match_platforms(self):
+        for platform in ("mock_x", "mock_linkedin", "mastodon"):
+            with self.subTest(platform=platform):
+                self.assertEqual(resolve_publisher(platform), platform)
+
+
+    def test_publisher_override_uses_environment_precedence(self):
+        self.file_values.return_value = {
+            "PUBLISHER_MASTODON": "mock_linkedin",
+        }
+        os.environ["PUBLISHER_MASTODON"] = "mock_x"
+
+        self.assertEqual(resolve_publisher("mastodon"), "mock_x")
+
+
+    def test_unknown_publisher_override_is_rejected(self):
+        os.environ["PUBLISHER_MASTODON"] = "unknown"
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "PUBLISHER_MASTODON must be",
+        ):
+            resolve_publisher("mastodon")
